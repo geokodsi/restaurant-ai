@@ -1,0 +1,25 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.1",
+    "@fastify/cors": "^11.2.0",
+    "@fastify/multipart": "^10.0.0",
+    "@supabase/supabase-js": "^2.107.0",
+    "axios": "^1.17.0",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.8.5",
+    "node-cron": "^4.2.1"
+  }
+}
