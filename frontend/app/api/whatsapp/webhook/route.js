@@ -32,10 +32,18 @@ export async function POST(request) {
 
   console.log('Incoming WhatsApp webhook:', JSON.stringify(body));
 
+  // Presence check only — never log the actual secret values.
+  console.log('WhatsApp webhook env check:', {
+    anthropic: Boolean(process.env.ANTHROPIC_API_KEY),
+    waToken: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
+    waPhone: Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID),
+  });
+
   try {
     const message = extractIncomingMessage(body);
     if (message) {
       const sentiment = await analyzeSentiment(message.text);
+      console.log('Sentiment classification:', sentiment);
       const reply =
         sentiment === 'positive'
           ? `Thank you so much for your visit! 🌟 We'd really appreciate it if you shared your experience in a Google review: ${GOOGLE_REVIEW_LINK}`
@@ -122,6 +130,8 @@ async function sendWhatsAppReply(to, bodyText) {
       }),
     }
   );
+
+  console.log('WhatsApp API response status:', res.status);
 
   if (!res.ok) {
     const errText = await res.text();
