@@ -135,6 +135,25 @@ async function sendWhatsAppReply(to, bodyText) {
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`WhatsApp send failed (${res.status}): ${errText}`);
+
+    // WhatsApp Cloud API returns errors as { error: { message, code, ... } }.
+    let errBody = errText;
+    try {
+      errBody = JSON.parse(errText);
+    } catch {
+      // Non-JSON error body — keep the raw text.
+    }
+
+    const apiError = errBody?.error;
+    console.error('WhatsApp API error response:', {
+      status: res.status,
+      body: errBody,
+      message: apiError?.message,
+      code: apiError?.code,
+    });
+
+    throw new Error(
+      `WhatsApp send failed (${res.status}): ${apiError?.message || errText}`
+    );
   }
 }
