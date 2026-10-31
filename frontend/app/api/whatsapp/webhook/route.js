@@ -1,46 +1,49 @@
 import Anthropic from '@anthropic-ai/sdk';
+import twilio from 'twilio';
 
-const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || 'repai_webhook_2024';
+// The Twilio SDK is a Node library (http/crypto), so pin this route to the
+// Node runtime rather than the edge.
+export const runtime = 'nodejs';
 
 // Placeholder — swap in the restaurant's real Google review link.
 const GOOGLE_REVIEW_LINK =
   'https://search.google.com/local/writereview?placeid=YOUR_PLACE_ID';
 
-// GET: Meta webhook verification handshake.
-export async function GET(request) {
-  const { searchParams } = new URL(request.url);
-  const token = searchParams.get('hub.verify_token');
-  const challenge = searchParams.get('hub.challenge');
-
-  if (token === VERIFY_TOKEN) {
-    return new Response(challenge, { status: 200 });
-  }
-
-  return new Response('Forbidden', { status: 403 });
+// GET: Twilio doesn't do a verification handshake. Kept so that pinging the
+// webhook URL in a browser or an uptime check gets a 200 instead of a 405.
+export async function GET() {
+  return new Response('OK', { status: 200 });
 }
 
-// POST: incoming WhatsApp messages.
+// POST: incoming WhatsApp messages from Twilio.
 export async function POST(request) {
-  const raw = await request.text();
-
-  let body;
+  // Twilio posts application/x-www-form-urlencoded, not JSON.
+  let form;
   try {
-    body = JSON.parse(raw);
-  } catch {
-    body = null;
+    form = await request.formData();
+  } catch (err) {
+    console.error('Failed to parse Twilio form body:', err);
+    return new Response('OK', { status: 200 });
   }
 
-  console.log('Incoming WhatsApp webhook:', JSON.stringify(body));
+  const message = extractIncomingMessage(form);
+
+  console.log('Incoming Twilio WhatsApp webhook:', {
+    from: form.get('From'),
+    profileName: form.get('ProfileName'),
+    body: form.get('Body'),
+    messageSid: form.get('MessageSid'),
+  });
 
   // Presence check only — never log the actual secret values.
   console.log('WhatsApp webhook env check:', {
     anthropic: Boolean(process.env.ANTHROPIC_API_KEY),
-    waToken: Boolean(process.env.WHATSAPP_ACCESS_TOKEN),
-    waPhone: Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID),
+    twilioSid: Boolean(process.env.TWILIO_ACCOUNT_SID),
+    twilioToken: Boolean(process.env.TWILIO_AUTH_TOKEN),
+    twilioNumber: Boolean(process.env.TWILIO_WHATSAPP_NUMBER),
   });
 
   try {
-    const message = extractIncomingMessage(body);
     if (message) {
       const sentiment = await analyzeSentiment(message.text);
       console.log('Sentiment classification:', sentiment);
@@ -51,32 +54,29 @@ export async function POST(request) {
       await sendWhatsAppReply(message.from, reply);
     }
   } catch (err) {
-    // Never fail the webhook — log and still return 200 so Meta doesn't retry-storm.
+    // Never fail the webhook — log and still return 200 so Twilio doesn't
+    // retry-storm.
     console.error('Failed to process WhatsApp message:', err);
   }
 
   return new Response('OK', { status: 200 });
 }
 
-// Pull the sender's phone number and text out of a Meta WhatsApp Cloud API
-// payload. Returns null for anything that isn't an inbound text message
-// (e.g. delivery/read status receipts, non-text messages).
-function extractIncomingMessage(body) {
-  const value = body?.entry?.[0]?.changes?.[0]?.value;
-  const message = value?.messages?.[0];
-
-  if (!message || message.type !== 'text') {
-    return null;
-  }
-
-  const from = message.from;
-  const text = message.text?.body;
+// Pull the sender's channel address and text out of a Twilio inbound message
+// webhook. `From` arrives as a channel address (`whatsapp:+15551234567`) and is
+// passed through verbatim so the reply goes back over the same channel.
+// Returns null for anything that isn't an inbound text message (e.g. status
+// callbacks, media-only messages).
+function extractIncomingMessage(form) {
+  const from = form.get('From');
+  const text = form.get('Body');
+  const profileName = form.get('ProfileName');
 
   if (!from || !text) {
     return null;
   }
 
-  return { from, text };
+  return { from, text, profileName: profileName || null };
 }
 
 // Ask Claude whether the customer's feedback is positive or negative.
@@ -103,57 +103,54 @@ async function analyzeSentiment(text) {
   return answer.includes('POSITIVE') ? 'positive' : 'negative';
 }
 
-// Send a text reply through the WhatsApp Cloud API.
+// Send a text reply through the Twilio WhatsApp API.
 async function sendWhatsAppReply(to, bodyText) {
-  const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const accessToken = process.env.WHATSAPP_ACCESS_TOKEN;
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken = process.env.TWILIO_AUTH_TOKEN;
+  const whatsappNumber = process.env.TWILIO_WHATSAPP_NUMBER;
 
-  if (!phoneNumberId || !accessToken) {
+  if (!accountSid || !authToken || !whatsappNumber) {
     throw new Error(
-      'WHATSAPP_PHONE_NUMBER_ID or WHATSAPP_ACCESS_TOKEN is not set'
+      'TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN or TWILIO_WHATSAPP_NUMBER is not set'
     );
   }
 
-  const res = await fetch(
-    `https://graph.facebook.com/v21.0/${phoneNumberId}/messages`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        to,
-        type: 'text',
-        text: { body: bodyText },
-      }),
-    }
-  );
+  const client = twilio(accountSid, authToken);
 
-  console.log('WhatsApp API response status:', res.status);
+  try {
+    // createWithHttpInfo returns the HTTP status alongside the message, so the
+    // diagnostic log can report the real API response status.
+    const { statusCode, body } = await client.messages.createWithHttpInfo({
+      from: toChannelAddress(whatsappNumber),
+      to: toChannelAddress(to),
+      body: bodyText,
+    });
 
-  if (!res.ok) {
-    const errText = await res.text();
-
-    // WhatsApp Cloud API returns errors as { error: { message, code, ... } }.
-    let errBody = errText;
-    try {
-      errBody = JSON.parse(errText);
-    } catch {
-      // Non-JSON error body — keep the raw text.
-    }
-
-    const apiError = errBody?.error;
-    console.error('WhatsApp API error response:', {
-      status: res.status,
-      body: errBody,
-      message: apiError?.message,
-      code: apiError?.code,
+    console.log('Twilio API response status:', statusCode, {
+      sid: body?.sid,
+      status: body?.status,
+      errorCode: body?.errorCode,
+      errorMessage: body?.errorMessage,
+    });
+  } catch (err) {
+    // Twilio throws RestException with { status, code, message, moreInfo }.
+    console.error('Twilio API error response:', {
+      status: err?.status,
+      code: err?.code,
+      message: err?.message,
+      moreInfo: err?.moreInfo,
+      details: err?.details,
     });
 
     throw new Error(
-      `WhatsApp send failed (${res.status}): ${apiError?.message || errText}`
+      `Twilio send failed (${err?.status ?? 'unknown'}): ${err?.message}`
     );
   }
+}
+
+// Twilio addresses WhatsApp senders/recipients as `whatsapp:+15551234567`.
+// Accept a bare E.164 number in TWILIO_WHATSAPP_NUMBER and add the prefix.
+function toChannelAddress(value) {
+  const trimmed = String(value).trim();
+  return trimmed.startsWith('whatsapp:') ? trimmed : `whatsapp:${trimmed}`;
 }
