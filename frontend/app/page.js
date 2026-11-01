@@ -24,9 +24,12 @@ export default function Home() {
           <a className="hover:text-zinc-900 dark:hover:text-zinc-50" href="#features">
             Features
           </a>
+          <a className="hover:text-zinc-900 dark:hover:text-zinc-50" href="/login">
+            Log in
+          </a>
           <a
             className="rounded-full bg-zinc-900 px-4 py-2 font-medium text-white transition-colors hover:bg-zinc-700 dark:bg-white dark:text-black dark:hover:bg-zinc-200"
-            href="#get-started"
+            href="/signup"
           >
             Get started
           </a>
@@ -48,7 +51,7 @@ export default function Home() {
           <div id="get-started" className="flex flex-col gap-3 sm:flex-row">
             <a
               className="flex h-12 items-center justify-center rounded-full bg-emerald-600 px-6 font-medium text-white transition-colors hover:bg-emerald-500"
-              href="#features"
+              href="/signup"
             >
               Start collecting feedback
             </a>

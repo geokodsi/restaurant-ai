@@ -1,13 +1,20 @@
 import Anthropic from '@anthropic-ai/sdk';
 import twilio from 'twilio';
+import { createAdminClient } from '@/lib/supabase/admin';
+import { normalizePhone } from '@/lib/phone';
 
 // The Twilio SDK is a Node library (http/crypto), so pin this route to the
 // Node runtime rather than the edge.
 export const runtime = 'nodejs';
 
-// Placeholder — swap in the restaurant's real Google review link.
-const GOOGLE_REVIEW_LINK =
-  'https://search.google.com/local/writereview?placeid=YOUR_PLACE_ID';
+const NEGATIVE_REPLY =
+  'Thank you for your feedback, our manager will reach out shortly';
+
+function positiveReply(reviewLink) {
+  return reviewLink
+    ? `Thank you so much for your visit! 🌟 We'd really appreciate it if you shared your experience in a Google review: ${reviewLink}`
+    : 'Thank you so much for your visit! 🌟 We really appreciate your kind words.';
+}
 
 // GET: Twilio doesn't do a verification handshake. Kept so that pinging the
 // webhook URL in a browser or an uptime check gets a 200 instead of a 405.
@@ -15,7 +22,9 @@ export async function GET() {
   return new Response('OK', { status: 200 });
 }
 
-// POST: incoming WhatsApp messages from Twilio.
+// POST: incoming WhatsApp messages from Twilio. Always answers 200 — a non-2xx
+// makes Twilio retry and report errors, and none of our failures are fixed by
+// a retry.
 export async function POST(request) {
   // Twilio posts application/x-www-form-urlencoded, not JSON.
   let form;
@@ -30,6 +39,7 @@ export async function POST(request) {
 
   console.log('Incoming Twilio WhatsApp webhook:', {
     from: form.get('From'),
+    to: form.get('To'),
     profileName: form.get('ProfileName'),
     body: form.get('Body'),
     messageSid: form.get('MessageSid'),
@@ -41,17 +51,15 @@ export async function POST(request) {
     twilioSid: Boolean(process.env.TWILIO_ACCOUNT_SID),
     twilioToken: Boolean(process.env.TWILIO_AUTH_TOKEN),
     twilioNumber: Boolean(process.env.TWILIO_WHATSAPP_NUMBER),
+    supabaseUrl: Boolean(
+      process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL
+    ),
+    supabaseServiceRole: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
   });
 
   try {
     if (message) {
-      const sentiment = await analyzeSentiment(message.text);
-      console.log('Sentiment classification:', sentiment);
-      const reply =
-        sentiment === 'positive'
-          ? `Thank you so much for your visit! 🌟 We'd really appreciate it if you shared your experience in a Google review: ${GOOGLE_REVIEW_LINK}`
-          : 'Thank you for your feedback, our manager will reach out to you shortly';
-      await sendWhatsAppReply(message.from, reply);
+      await handleMessage(message);
     }
   } catch (err) {
     // Never fail the webhook — log and still return 200 so Twilio doesn't
@@ -62,6 +70,74 @@ export async function POST(request) {
   return new Response('OK', { status: 200 });
 }
 
+async function handleMessage(message) {
+  const supabase = createAdminClient();
+  if (!supabase) {
+    console.error(
+      'Supabase admin client unavailable: set SUPABASE_URL (or NEXT_PUBLIC_SUPABASE_URL) and SUPABASE_SERVICE_ROLE_KEY'
+    );
+    return;
+  }
+
+  // a) Which restaurant owns the number the guest messaged?
+  const restaurantNumber = normalizePhone(message.to);
+  const { data: restaurant, error: lookupError } = await supabase
+    .from('restaurants')
+    .select('id, name, google_review_link')
+    .eq('twilio_number', restaurantNumber)
+    .maybeSingle();
+
+  if (lookupError) {
+    console.error('Restaurant lookup failed:', lookupError);
+    return;
+  }
+  // b) Unknown number: nothing to do, but don't error.
+  if (!restaurant) {
+    console.warn('No restaurant registered for Twilio number:', restaurantNumber);
+    return;
+  }
+  console.log('Matched restaurant:', { id: restaurant.id, name: restaurant.name });
+
+  // c) Claude sentiment. If it fails, fall back to the safe (manager) reply and
+  // store the feedback with no sentiment so it still shows up.
+  let sentiment = null;
+  try {
+    sentiment = await analyzeSentiment(message.text);
+    console.log('Sentiment classification:', sentiment);
+  } catch (err) {
+    console.error('Sentiment analysis failed:', err);
+  }
+
+  // e/f) Reply with this restaurant's review link when positive.
+  const reviewLink = restaurant.google_review_link?.trim() || null;
+  const isPositive = sentiment === 'positive';
+  const reply = isPositive ? positiveReply(reviewLink) : NEGATIVE_REPLY;
+
+  let replySent = false;
+  try {
+    await sendWhatsAppReply(message.from, reply, message.to);
+    replySent = true;
+  } catch (err) {
+    console.error('Failed to send WhatsApp reply:', err);
+  }
+
+  // d) Save the feedback row.
+  const { error: insertError } = await supabase.from('feedback').insert({
+    restaurant_id: restaurant.id,
+    customer_phone: normalizePhone(message.from),
+    customer_message: message.text,
+    sentiment,
+    ai_reply: replySent ? reply : null,
+    review_link_sent: Boolean(isPositive && reviewLink && replySent),
+  });
+
+  if (insertError) {
+    console.error('Failed to save feedback:', insertError);
+  } else {
+    console.log('Feedback saved for restaurant', restaurant.id);
+  }
+}
+
 // Pull the sender's channel address and text out of a Twilio inbound message
 // webhook. `From` arrives as a channel address (`whatsapp:+15551234567`) and is
 // passed through verbatim so the reply goes back over the same channel.
@@ -69,14 +145,15 @@ export async function POST(request) {
 // callbacks, media-only messages).
 function extractIncomingMessage(form) {
   const from = form.get('From');
+  const to = form.get('To');
   const text = form.get('Body');
   const profileName = form.get('ProfileName');
 
-  if (!from || !text) {
+  if (!from || !to || !text) {
     return null;
   }
 
-  return { from, text, profileName: profileName || null };
+  return { from, to, text, profileName: profileName || null };
 }
 
 // Ask Claude whether the customer's feedback is positive or negative.
@@ -104,10 +181,12 @@ async function analyzeSentiment(text) {
 }
 
 // Send a text reply through the Twilio WhatsApp API.
-async function sendWhatsAppReply(to, bodyText) {
+// Replies go out from the number the guest messaged (`replyFrom`, Twilio's
+// "To"), falling back to TWILIO_WHATSAPP_NUMBER.
+async function sendWhatsAppReply(to, bodyText, replyFrom) {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
-  const whatsappNumber = process.env.TWILIO_WHATSAPP_NUMBER;
+  const whatsappNumber = replyFrom || process.env.TWILIO_WHATSAPP_NUMBER;
 
   if (!accountSid || !authToken || !whatsappNumber) {
     throw new Error(
