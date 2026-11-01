@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { LayoutDashboard, LogOut, Menu, MessageSquareText, Settings } from 'lucide-react';
+import { LayoutDashboard, LogOut, Menu, MessageSquareText, QrCode, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Logo } from '@/components/logo';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,7 @@ import {
 const NAV = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, exact: true },
   { href: '/dashboard/feedback', label: 'Feedback', icon: MessageSquareText },
+  { href: '/dashboard/qr-code', label: 'QR Code', icon: QrCode },
   { href: '/dashboard/settings', label: 'Settings', icon: Settings },
 ];
 

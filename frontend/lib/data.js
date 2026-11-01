@@ -92,3 +92,20 @@ export async function getFeedback(id) {
   }
   return { feedback: data, error: false };
 }
+
+// Fetched separately from getRestaurant() so the rest of the dashboard keeps
+// working even if the custom_qr_message migration hasn't been applied yet.
+export async function getCustomQrMessage(restaurantId) {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from('restaurants')
+    .select('custom_qr_message')
+    .eq('id', restaurantId)
+    .maybeSingle();
+
+  if (error) {
+    console.error('Failed to load custom QR message:', error);
+    return null;
+  }
+  return data?.custom_qr_message ?? null;
+}
